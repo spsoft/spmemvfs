@@ -43,6 +43,14 @@ typedef struct spmembuffer_t {
 	int total;
 } spmembuffer_t;
 
+typedef struct spmembuffer_link_t {
+	char * path;
+	spmembuffer_t * mem;
+	struct spmembuffer_link_t * next;
+} spmembuffer_link_t;
+
+spmembuffer_link_t * spmembuffer_link_build( const char * path, spmembuffer_t * mem );
+
 typedef struct spmemvfs_db_t {
 	sqlite3 * handle;
 	spmembuffer_t * mem;
