@@ -129,24 +129,36 @@ int writeFile( const char * path, spmembuffer_t * mem )
 
 int main( int argc, char * argv[] )
 {
-	const char * path = "abc.db";
-
+    int ret;
+    const char * path = "abc.db";
+    int simu_leak = 0;
+    int opt;
+    
+    while ((opt = getopt(argc, argv, "lh")) != -1) {
+        switch (opt) {
+        case 'l': simu_leak = 1; break;
+        case 'h': printf("help:\n-l : simulate 'leakage' (db not closed on exit)\n"); exit(EXIT_SUCCESS);
+        }
+    }
+    
 	spmemvfs_db_t db;
 
 	spmembuffer_t * mem = (spmembuffer_t*)calloc( sizeof( spmembuffer_t ), 1 );
-
+    assert( NULL != mem);
+    
 	spmemvfs_env_init();
 
 	readFile( path, mem );
-	spmemvfs_open_db( &db, path, mem );
-
+	ret = spmemvfs_open_db( &db, path, mem );
+    if(SQLITE_OK != ret){fprintf(stderr, "ERROR: couldn't open db. F:%s L:%d\n", __FILE__, __LINE__); return 1; }
+    
 	assert( db.mem == mem );
 
 	test( &db );
 
 	writeFile( path, db.mem );
 
-	spmemvfs_close_db( &db );
+	if( !simu_leak ) spmemvfs_close_db( &db );
 
 	spmemvfs_env_fini();
 

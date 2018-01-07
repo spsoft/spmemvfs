@@ -29,6 +29,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <assert.h>
 
 #include "spmemvfs.h"
 
@@ -108,11 +109,13 @@ int spmemfileClose( sqlite3_file * file )
 		if( NULL != memfile->mem ) {
 			if( memfile->mem->data ) free( memfile->mem->data );
 			free( memfile->mem );
+            memfile->mem = NULL;
 		}
 	}
 
 	free( memfile->path );
-
+    memfile->path = NULL;
+    
 	return SQLITE_OK;
 }
 
@@ -293,11 +296,12 @@ int spmemvfsOpen( sqlite3_vfs * vfs, const char * path, sqlite3_file * file, int
 	memfile->flags = flags;
 
 	memfile->path = strdup( path );
-
+    if( NULL == memfile->path) return SQLITE_NOMEM;
+    
 	if( SQLITE_OPEN_MAIN_DB & memfile->flags ) {
 		memfile->mem = memvfs->cb.load( memvfs->cb.arg, path );
 	} else {
-		memfile->mem = (spmembuffer_t*)calloc( sizeof( spmembuffer_t ), 1 );
+		memfile->mem = (spmembuffer_t*)calloc( 1, sizeof( spmembuffer_t ) );
 	}
 
 	return memfile->mem ? SQLITE_OK : SQLITE_ERROR;
@@ -368,8 +372,9 @@ int spmemvfs_init( spmemvfs_cb_t * cb )
 
 	if( g_spmemvfs.parent ) return SQLITE_OK;
 
-	parent = sqlite3_vfs_find( 0 );
-
+	parent = sqlite3_vfs_find( NULL );
+    assert( NULL != parent);
+    
 	g_spmemvfs.parent = parent;
 
 	g_spmemvfs.base.mxPathname = parent->mxPathname;
@@ -387,6 +392,26 @@ typedef struct spmembuffer_link_t {
 	spmembuffer_t * mem;
 	struct spmembuffer_link_t * next;
 } spmembuffer_link_t;
+
+
+spmembuffer_link_t * spmembuffer_link_find( spmembuffer_link_t ** head, const char * path )
+{
+	spmembuffer_link_t * ret = NULL;
+
+	spmembuffer_link_t ** iter = head;
+	for( ; NULL != *iter; ) {
+		spmembuffer_link_t * curr = *iter;
+
+		if( 0 == strcmp( path, curr->path ) ) {
+			ret = curr;
+			break;
+		} else {
+			iter = &( curr->next );
+		}
+	}
+
+	return ret;
+}
 
 spmembuffer_link_t * spmembuffer_link_remove( spmembuffer_link_t ** head, const char * path )
 {
@@ -408,11 +433,32 @@ spmembuffer_link_t * spmembuffer_link_remove( spmembuffer_link_t ** head, const 
 	return ret;
 }
 
+// remove link corresponding to mem
+spmembuffer_link_t * spmembuffer_link_remove_mem( spmembuffer_link_t ** head, spmembuffer_t * mem )
+{
+	spmembuffer_link_t * ret = NULL;
+
+	spmembuffer_link_t ** iter = head;
+
+	for( ; NULL != *iter; ) {
+		spmembuffer_link_t * curr = *iter;
+		if( curr -> mem == mem ) {
+			ret = curr;
+			*iter = curr->next;
+			break;
+		} else {
+			iter = &( curr->next );
+		}
+	}
+
+	return ret;
+}
+
 void spmembuffer_link_free( spmembuffer_link_t * iter )
 {
 	free( iter->path );
-	free( iter->mem->data );
-	free( iter->mem );
+    free( iter->mem->data );
+    free( iter->mem );
 	free( iter );
 }
 
@@ -433,12 +479,10 @@ static spmembuffer_t * load_cb( void * arg, const char * path )
 
 	sqlite3_mutex_enter( env->mutex );
 	{
-		spmembuffer_link_t * toFind = spmembuffer_link_remove( &( env->head ), path );
+		spmembuffer_link_t * toFind = spmembuffer_link_find( &( env->head ), path );
 
 		if( NULL != toFind ) {
 			ret = toFind->mem;
-			free( toFind->path );
-			free( toFind );
 		}
 	}
 	sqlite3_mutex_leave( env->mutex );
@@ -453,13 +497,25 @@ int spmemvfs_env_init()
 	if( NULL == g_spmemvfs_env ) {
 		spmemvfs_cb_t cb;
 
-		g_spmemvfs_env = (spmemvfs_env_t*)calloc( sizeof( spmemvfs_env_t ), 1 );
-		g_spmemvfs_env->mutex = sqlite3_mutex_alloc( SQLITE_MUTEX_FAST );
+		g_spmemvfs_env = (spmemvfs_env_t*)calloc( 1, sizeof( spmemvfs_env_t ) );
+        if( NULL == g_spmemvfs_env) return SQLITE_NOMEM;
 
+		g_spmemvfs_env->mutex = sqlite3_mutex_alloc( SQLITE_MUTEX_FAST );
+        if( NULL == g_spmemvfs_env->mutex) {
+            free(g_spmemvfs_env);
+            g_spmemvfs_env = NULL;
+            return SQLITE_NOMEM;
+        }
+        
 		cb.arg = g_spmemvfs_env;
 		cb.load = load_cb;
 
 		ret = spmemvfs_init( &cb );
+        if( SQLITE_OK != ret) {
+            sqlite3_mutex_free(g_spmemvfs_env->mutex);
+            free(g_spmemvfs_env);
+            g_spmemvfs_env = NULL;
+        }
 	}
 
 	return ret;
@@ -478,7 +534,7 @@ void spmemvfs_env_fini()
 		iter = g_spmemvfs_env->head;
 		for( ; NULL != iter; ) {
 			spmembuffer_link_t * next = iter->next;
-
+            fprintf(stderr, "SQLITE ERROR spmemvfs: %s not closed on exit.\n", iter -> path);
 			spmembuffer_link_free( iter );
 
 			iter = next;
@@ -497,8 +553,15 @@ int spmemvfs_open_db( spmemvfs_db_t * db, const char * path, spmembuffer_t * mem
 
 	memset( db, 0, sizeof( spmemvfs_db_t ) );
 
-	iter = (spmembuffer_link_t*)calloc( sizeof( spmembuffer_link_t ), 1 );
+	iter = (spmembuffer_link_t*)calloc( 1, sizeof( spmembuffer_link_t ) );
+    if(NULL == iter) return SQLITE_NOMEM;
+    
 	iter->path = strdup( path );
+    if(NULL == iter->path) {
+        free(iter);
+        return SQLITE_NOMEM;
+    }
+
 	iter->mem = mem;
 
 	sqlite3_mutex_enter( g_spmemvfs_env->mutex );
@@ -511,13 +574,14 @@ int spmemvfs_open_db( spmemvfs_db_t * db, const char * path, spmembuffer_t * mem
 	ret = sqlite3_open_v2( path, &(db->handle),
 			SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, SPMEMVFS_NAME );
 
-	if( 0 == ret ) {
+	if( SQLITE_OK == ret ) {
 		db->mem = mem;
 	} else {
 		sqlite3_mutex_enter( g_spmemvfs_env->mutex );
 		{
 			iter = spmembuffer_link_remove( &(g_spmemvfs_env->head), path );
-			if( NULL != iter ) spmembuffer_link_free( iter );
+            assert( NULL != iter );
+			spmembuffer_link_free( iter );
 		}
 		sqlite3_mutex_leave( g_spmemvfs_env->mutex );
 	}
@@ -529,6 +593,8 @@ int spmemvfs_close_db( spmemvfs_db_t * db )
 {
 	int ret = 0;
 
+    spmembuffer_link_t * iter = NULL;
+    
 	if( NULL == db ) return 0;
 
 	if( NULL != db->handle ) {
@@ -537,8 +603,15 @@ int spmemvfs_close_db( spmemvfs_db_t * db )
 	}
 
 	if( NULL != db->mem ) {
-		if( NULL != db->mem->data ) free( db->mem->data );
-		free( db->mem );
+        /* remove link from list and delete it */
+		sqlite3_mutex_enter( g_spmemvfs_env->mutex );
+		{
+			iter = spmembuffer_link_remove_mem( &(g_spmemvfs_env->head), db->mem );
+            assert( NULL != iter);
+			spmembuffer_link_free( iter ); /* frees both data and mem. */
+		}
+		sqlite3_mutex_leave( g_spmemvfs_env->mutex );
+        
 		db->mem = NULL;
 	}
 
