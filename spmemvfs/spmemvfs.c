@@ -382,11 +382,32 @@ int spmemvfs_init( spmemvfs_cb_t * cb )
 
 //===========================================================================
 
-typedef struct spmembuffer_link_t {
-	char * path;
-	spmembuffer_t * mem;
-	struct spmembuffer_link_t * next;
-} spmembuffer_link_t;
+typedef struct spmemvfs_env_t {
+	spmembuffer_link_t * head;
+	sqlite3_mutex * mutex;
+} spmemvfs_env_t;
+
+static spmemvfs_env_t * g_spmemvfs_env = NULL;
+
+//===========================================================================
+
+spmembuffer_link_t * spmembuffer_link_build( const char * path, spmembuffer_t * mem )
+{
+	spmembuffer_link_t * iter = NULL;
+
+	iter = (spmembuffer_link_t*)calloc( sizeof( spmembuffer_link_t ), 1 );
+	iter->path = strdup( path );
+	iter->mem = mem;
+
+	sqlite3_mutex_enter( g_spmemvfs_env->mutex );
+	{
+		iter->next = g_spmemvfs_env->head;
+		g_spmemvfs_env->head = iter;
+	}
+	sqlite3_mutex_leave( g_spmemvfs_env->mutex );
+
+	return iter;
+}
 
 spmembuffer_link_t * spmembuffer_link_remove( spmembuffer_link_t ** head, const char * path )
 {
@@ -417,13 +438,6 @@ void spmembuffer_link_free( spmembuffer_link_t * iter )
 }
 
 //===========================================================================
-
-typedef struct spmemvfs_env_t {
-	spmembuffer_link_t * head;
-	sqlite3_mutex * mutex;
-} spmemvfs_env_t;
-
-static spmemvfs_env_t * g_spmemvfs_env = NULL;
 
 static spmembuffer_t * load_cb( void * arg, const char * path )
 {
@@ -493,20 +507,9 @@ int spmemvfs_open_db( spmemvfs_db_t * db, const char * path, spmembuffer_t * mem
 {
 	int ret = 0;
 
-	spmembuffer_link_t * iter = NULL;
+	spmembuffer_link_t * iter = spmembuffer_link_build( path, mem );
 
 	memset( db, 0, sizeof( spmemvfs_db_t ) );
-
-	iter = (spmembuffer_link_t*)calloc( sizeof( spmembuffer_link_t ), 1 );
-	iter->path = strdup( path );
-	iter->mem = mem;
-
-	sqlite3_mutex_enter( g_spmemvfs_env->mutex );
-	{
-		iter->next = g_spmemvfs_env->head;
-		g_spmemvfs_env->head = iter;
-	}
-	sqlite3_mutex_leave( g_spmemvfs_env->mutex );
 
 	ret = sqlite3_open_v2( path, &(db->handle),
 			SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, SPMEMVFS_NAME );
